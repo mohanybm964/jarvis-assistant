@@ -177,6 +177,83 @@ class AiService {
     throw Exception(message);
   }
 
+  Future<List<String>> cloudModels(
+    ProviderType provider,
+    String apiKey,
+  ) async {
+    late http.Response r;
+
+    switch (provider) {
+      case ProviderType.openai:
+        r = await http.get(
+          Uri.parse('https://api.openai.com/v1/models'),
+          headers: {'Authorization': 'Bearer $apiKey'},
+        );
+        _check(r);
+        final data = jsonDecode(r.body)['data'] as List? ?? [];
+        final result = data
+            .map((e) => e['id']?.toString() ?? '')
+            .where((id) =>
+                id.isNotEmpty &&
+                (id.startsWith('gpt-') ||
+                    id.startsWith('o1') ||
+                    id.startsWith('o3') ||
+                    id.startsWith('o4')))
+            .toSet()
+            .toList();
+        result.sort();
+        return result;
+
+      case ProviderType.gemini:
+        r = await http.get(
+          Uri.parse(
+            'https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey',
+          ),
+        );
+        _check(r);
+        final data = jsonDecode(r.body)['models'] as List? ?? [];
+        final result = <String>[];
+
+        for (final item in data) {
+          final methods =
+              (item['supportedGenerationMethods'] as List? ?? [])
+                  .map((e) => e.toString())
+                  .toList();
+
+          final name = item['name']?.toString() ?? '';
+
+          if (methods.contains('generateContent') &&
+              name.startsWith('models/')) {
+            result.add(name.substring('models/'.length));
+          }
+        }
+
+        result.sort();
+        return result.toSet().toList();
+
+      case ProviderType.anthropic:
+        r = await http.get(
+          Uri.parse('https://api.anthropic.com/v1/models?limit=100'),
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+        );
+        _check(r);
+        final data = jsonDecode(r.body)['data'] as List? ?? [];
+        final result = data
+            .map((e) => e['id']?.toString() ?? '')
+            .where((id) => id.startsWith('claude-'))
+            .toSet()
+            .toList();
+        result.sort();
+        return result;
+
+      case ProviderType.ollama:
+        return [];
+    }
+  }
+
   Future<List<String>> ollamaModels(String base) async {
     final r = await http.get(Uri.parse('$base/api/tags'));
     _check(r);
@@ -523,7 +600,9 @@ class _SettingsPageState extends State<SettingsPage> {
   final pull = TextEditingController();
   final ai = AiService();
   List<String> localModels = [];
+  List<String> cloudModelList = [];
   bool loading = false;
+  bool loadingModels = false;
 
   @override
   void initState() {
@@ -563,9 +642,70 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  List<String> get available => provider == ProviderType.ollama
-      ? (localModels.isEmpty ? [model] : localModels)
-      : _JarvisHomeState.models[provider]!;
+  List<String> get available {
+    if (provider == ProviderType.ollama) {
+      return localModels.isEmpty ? [model] : localModels;
+    }
+
+    if (cloudModelList.isNotEmpty) {
+      return cloudModelList;
+    }
+
+    return _JarvisHomeState.models[provider]!;
+  }
+
+  Future<void> _fetchCloudModels() async {
+    if (provider == ProviderType.ollama) return;
+
+    final apiKey = key.text.trim();
+
+    if (apiKey.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter an API key first.')),
+        );
+      }
+      return;
+    }
+
+    setState(() => loadingModels = true);
+
+    try {
+      final fetched = await ai.cloudModels(provider, apiKey);
+
+      if (fetched.isEmpty) {
+        throw Exception('No compatible chat models were returned.');
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        cloudModelList = fetched;
+        if (!cloudModelList.contains(model)) {
+          model = cloudModelList.first;
+        }
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${cloudModelList.length} models loaded.'),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        final message =
+            e.toString().replaceFirst('Exception: ', '');
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => loadingModels = false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -582,8 +722,20 @@ class _SettingsPageState extends State<SettingsPage> {
               onChanged: (p) async {
                 if (p == null) return;
                 provider = p;
+                cloudModelList = [];
                 await _loadKey();
-                model = available.first;
+
+                if (provider == ProviderType.ollama) {
+                  await _refreshOllama();
+                } else if (key.text.trim().isNotEmpty) {
+                  await _fetchCloudModels();
+                }
+
+                if (available.isNotEmpty &&
+                    !available.contains(model)) {
+                  model = available.first;
+                }
+
                 setState(() {});
               },
             ),
@@ -603,13 +755,27 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               const SizedBox(height: 10),
               FilledButton(
-                onPressed: () async {
-                  await ApiKeys.write(provider, key.text.trim());
-                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('API key saved securely on this device.')),
-                  );
-                },
-                child: const Text('SAVE API KEY'),
+                onPressed: loadingModels
+                    ? null
+                    : () async {
+                        await ApiKeys.write(
+                          provider,
+                          key.text.trim(),
+                        );
+
+                        await _fetchCloudModels();
+                      },
+                child: Text(
+                  loadingModels
+                      ? 'FETCHING MODELS...'
+                      : 'SAVE API KEY & FETCH MODELS',
+                ),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                onPressed:
+                    loadingModels ? null : _fetchCloudModels,
+                child: const Text('REFRESH MODELS'),
               ),
             ] else ...[
               TextField(
