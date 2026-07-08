@@ -156,9 +156,25 @@ class AiService {
   }
 
   void _check(http.Response r) {
-    if (r.statusCode < 200 || r.statusCode >= 300) {
-      throw Exception('HTTP ${r.statusCode}: ${r.body}');
+    if (r.statusCode >= 200 && r.statusCode < 300) return;
+
+    String message = 'Request failed';
+
+    try {
+      final body = jsonDecode(r.body);
+      final error = body['error'];
+      if (error is Map && error['message'] is String) {
+        message = error['message'];
+      }
+    } catch (_) {}
+
+    if (r.statusCode == 401 || r.statusCode == 403) {
+      message = 'API key rejected. Check the key in Settings.';
+    } else if (r.statusCode == 429) {
+      message = 'Gemini quota exceeded. Wait for quota reset or use another provider.';
     }
+
+    throw Exception(message);
   }
 
   Future<List<String>> ollamaModels(String base) async {
@@ -223,7 +239,7 @@ class _JarvisHomeState extends State<JarvisHome> {
 
   static const models = {
     ProviderType.openai: ['gpt-4o-mini', 'gpt-4o'],
-    ProviderType.gemini: ['gemini-2.0-flash', 'gemini-1.5-pro'],
+    ProviderType.gemini: ['gemini-2.5-flash'],
     ProviderType.anthropic: ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
   };
 
@@ -277,8 +293,29 @@ class _JarvisHomeState extends State<JarvisHome> {
       await store.save(chats);
       if (ttsEnabled) await tts.speak(reply);
     } catch (e) {
+      if (active != null &&
+          active!.messages.isNotEmpty &&
+          active!.messages.last.role == 'user' &&
+          active!.messages.last.content == text) {
+        active!.messages.removeLast();
+        await store.save(chats);
+      }
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        setState(() {});
+
+        final message =
+            e.toString().replaceFirst('Exception: ', '');
+
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(message),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
+          );
       }
     } finally {
       if (mounted) setState(() => busy = false);
