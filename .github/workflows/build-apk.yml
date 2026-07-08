@@ -36,6 +36,36 @@ jobs:
       - name: Generate Android files
         run: flutter create --platforms=android --project-name=jarvis_assistant .
 
+      - name: Set Android minimum SDK 26
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+
+          candidates = [
+              Path("android/app/build.gradle.kts"),
+              Path("android/app/build.gradle"),
+          ]
+
+          for path in candidates:
+              if not path.exists():
+                  continue
+
+              text = path.read_text()
+
+              text = text.replace(
+                  "minSdk = flutter.minSdkVersion",
+                  "minSdk = 26",
+              )
+
+              text = text.replace(
+                  "minSdkVersion flutter.minSdkVersion",
+                  "minSdkVersion 26",
+              )
+
+              path.write_text(text)
+              print(f"Patched {path} to minSdk 26")
+          PYTHON
+
       - name: Install dependencies
         run: flutter pub get
 
