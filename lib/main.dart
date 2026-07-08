@@ -262,13 +262,43 @@ class AiService {
         .toList();
   }
 
-  Future<void> pullOllama(String base, String model) async {
-    final r = await http.post(
+  Stream<Map<String, dynamic>> pullOllama(
+    String base,
+    String model,
+  ) async* {
+    final request = http.Request(
+      'POST',
       Uri.parse('$base/api/pull'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'name': model, 'stream': false}),
     );
-    _check(r);
+
+    request.headers['Content-Type'] = 'application/json';
+    request.body = jsonEncode({
+      'name': model,
+      'stream': true,
+    });
+
+    final response = await request.send();
+
+    if (response.statusCode < 200 ||
+        response.statusCode >= 300) {
+      final body = await response.stream.bytesToString();
+      throw Exception(
+        'Ollama HTTP ${response.statusCode}: $body',
+      );
+    }
+
+    await for (final line
+        in response.stream
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())) {
+      if (line.trim().isEmpty) continue;
+
+      final data = jsonDecode(line);
+
+      if (data is Map<String, dynamic>) {
+        yield data;
+      }
+    }
   }
 }
 
@@ -603,6 +633,8 @@ class _SettingsPageState extends State<SettingsPage> {
   List<String> cloudModelList = [];
   bool loading = false;
   bool loadingModels = false;
+  String ollamaStatus = 'Not connected';
+  double? pullProgress;
 
   @override
   void initState() {
@@ -631,14 +663,97 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _pull() async {
-    if (pull.text.trim().isEmpty) return;
-    setState(() => loading = true);
+    final requestedModel = pull.text.trim();
+
+    if (requestedModel.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter an Ollama model name first.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      pullProgress = null;
+      ollamaStatus = 'Connecting to Ollama...';
+    });
+
     try {
-      await ai.pullOllama(base.text.trim(), pull.text.trim());
+      await for (final event in ai.pullOllama(
+        base.text.trim(),
+        requestedModel,
+      )) {
+        final status =
+            event['status']?.toString() ?? 'Downloading...';
+
+        final completed = event['completed'];
+        final total = event['total'];
+
+        double? progress;
+
+        if (completed is num &&
+            total is num &&
+            total > 0) {
+          progress = completed / total;
+        }
+
+        if (!mounted) return;
+
+        setState(() {
+          ollamaStatus = status;
+          pullProgress = progress;
+        });
+      }
+
       await _refreshOllama();
+
+      if (!mounted) return;
+
+      setState(() {
+        model = requestedModel;
+        ollamaStatus = 'Model ready: $requestedModel';
+        pullProgress = 1.0;
+      });
+
       pull.clear();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '$requestedModel downloaded successfully.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      final raw =
+          e.toString().replaceFirst('Exception: ', '');
+
+      final message =
+          raw.contains('Connection refused')
+              ? 'Cannot connect to Ollama at ${base.text.trim()}. Start an Ollama server first or enter the server LAN address.'
+              : raw;
+
+      setState(() {
+        ollamaStatus = message;
+        pullProgress = null;
+      });
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(message),
+            duration: const Duration(seconds: 8),
+          ),
+        );
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) {
+        setState(() => loading = false);
+      }
     }
   }
 
@@ -795,8 +910,29 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 10),
               FilledButton(
                 onPressed: loading ? null : _pull,
-                child: Text(loading ? 'PULLING...' : 'PULL MODEL'),
+                child: Text(
+                  loading ? 'PULLING MODEL...' : 'PULL MODEL',
+                ),
               ),
+              const SizedBox(height: 16),
+              if (loading || ollamaStatus != 'Not connected') ...[
+                Text(
+                  ollamaStatus,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 10),
+                if (loading)
+                  LinearProgressIndicator(
+                    value: pullProgress,
+                  ),
+                if (pullProgress != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '${(pullProgress! * 100).toStringAsFixed(1)}%',
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ],
             ],
             const SizedBox(height: 24),
             FilledButton(
