@@ -11,12 +11,13 @@ import 'package:uuid/uuid.dart';
 
 void main() => runApp(const JarvisApp());
 
-enum ProviderType { openai, gemini, anthropic, ollama }
+enum ProviderType { openai, gemini, openrouter, anthropic, ollama }
 
 extension ProviderTypeX on ProviderType {
   String get label => switch (this) {
     ProviderType.openai => 'OpenAI',
     ProviderType.gemini => 'Gemini',
+    ProviderType.openrouter => 'OpenRouter',
     ProviderType.anthropic => 'Anthropic',
     ProviderType.ollama => 'Ollama (Local)',
   };
@@ -94,6 +95,7 @@ class AiService {
     return switch (provider) {
       ProviderType.openai => _openAI(model, messages, apiKey!),
       ProviderType.gemini => _gemini(model, messages, apiKey!),
+      ProviderType.openrouter => _openRouter(model, messages, apiKey!),
       ProviderType.anthropic => _anthropic(model, messages, apiKey!),
       ProviderType.ollama => _ollama(model, messages, ollamaBaseUrl),
     };
@@ -121,6 +123,36 @@ class AiService {
     );
     _check(r);
     return jsonDecode(r.body)['candidates'][0]['content']['parts'][0]['text'];
+  }
+
+  Future<String> _openRouter(
+    String model,
+    List<ChatMessage> m,
+    String key,
+  ) async {
+    final r = await http.post(
+      Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
+      headers: {
+        'Authorization': 'Bearer $key',
+        'Content-Type': 'application/json',
+        'X-OpenRouter-Title': 'JARVIS Assistant',
+      },
+      body: jsonEncode({
+        'model': model,
+        'messages': m.map((e) => e.toJson()).toList(),
+      }),
+    );
+
+    _check(r);
+
+    final body = jsonDecode(r.body);
+    final content = body['choices']?[0]?['message']?['content'];
+
+    if (content is String && content.isNotEmpty) {
+      return content;
+    }
+
+    throw Exception('OpenRouter returned an empty response.');
   }
 
   Future<String> _anthropic(String model, List<ChatMessage> m, String key) async {
@@ -202,6 +234,30 @@ class AiService {
             .toSet()
             .toList();
         result.sort();
+        return result;
+
+      case ProviderType.openrouter:
+        r = await http.get(
+          Uri.parse(
+            'https://openrouter.ai/api/v1/models?output_modalities=text',
+          ),
+          headers: {
+            'Authorization': 'Bearer $apiKey',
+          },
+        );
+
+        _check(r);
+
+        final data = jsonDecode(r.body)['data'] as List? ?? [];
+
+        final result = data
+            .map((e) => e['id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
+
+        result.sort();
+
         return result;
 
       case ProviderType.gemini:
@@ -347,6 +403,7 @@ class _JarvisHomeState extends State<JarvisHome> {
   static const models = {
     ProviderType.openai: ['gpt-4o-mini', 'gpt-4o'],
     ProviderType.gemini: ['gemini-2.5-flash'],
+    ProviderType.openrouter: ['openrouter/auto', 'openrouter/free'],
     ProviderType.anthropic: ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
   };
 
